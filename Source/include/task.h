@@ -145,6 +145,7 @@ typedef struct xTASK_PARAMETERS
 	UBaseType_t uxPriority;
 	StackType_t *puxStackBuffer;
 	MemoryRegion_t xRegions[ portNUM_CONFIGURABLE_REGIONS ];
+	struct _reent *xReent; /*< Optional user provided _reent struct. Should be already initialized */
 } TaskParameters_t;
 
 /* Used with the uxTaskGetSystemState() function to return the state of each task
@@ -158,7 +159,9 @@ typedef struct xTASK_STATUS
 	UBaseType_t uxCurrentPriority;	/* The priority at which the task was running (may be inherited) when the structure was populated. */
 	UBaseType_t uxBasePriority;		/* The priority to which the task will return if the task's current priority has been inherited to avoid unbounded priority inversion when obtaining a mutex.  Only valid if configUSE_MUTEXES is defined as 1 in FreeRTOSConfig.h. */
 	uint32_t ulRunTimeCounter;		/* The total run time allocated to the task so far, as defined by the run time stats clock.  See http://www.freertos.org/rtos-run-time-stats.html.  Only valid when configGENERATE_RUN_TIME_STATS is defined as 1 in FreeRTOSConfig.h. */
-	uint16_t usStackHighWaterMark;	/* The minimum amount of stack space that has remained for the task since the task was created.  The closer this value is to zero the closer the task has come to overflowing its stack. */
+	uint16_t usStackHighWaterMark;		/* The minimum amount of stack space that has remained for the task since the task was created.  The closer this value is to zero the closer the task has come to overflowing its stack. */
+	StackType_t *pxStack;           	/* Start of the stack block (lowest address) */
+	StackType_t *pxTopOfStack;      	/* Current stack pointer */
 } TaskStatus_t;
 
 /* Possible return values for eTaskConfirmSleepModeStatus(). */
@@ -327,7 +330,7 @@ is used in assert() statements. */
  * \defgroup xTaskCreate xTaskCreate
  * \ingroup Tasks
  */
-#define xTaskCreate( pvTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask ) xTaskGenericCreate( ( pvTaskCode ), ( pcName ), ( usStackDepth ), ( pvParameters ), ( uxPriority ), ( pxCreatedTask ), ( NULL ), ( NULL ) )
+#define xTaskCreate( pvTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask ) xTaskGenericCreate( ( pvTaskCode ), ( pcName ), ( usStackDepth ), ( pvParameters ), ( uxPriority ), ( pxCreatedTask ), ( NULL ), ( NULL ), ( NULL ) )
 
 /**
  * task. h
@@ -396,7 +399,7 @@ TaskHandle_t xHandle;
  * \defgroup xTaskCreateRestricted xTaskCreateRestricted
  * \ingroup Tasks
  */
-#define xTaskCreateRestricted( x, pxCreatedTask ) xTaskGenericCreate( ((x)->pvTaskCode), ((x)->pcName), ((x)->usStackDepth), ((x)->pvParameters), ((x)->uxPriority), (pxCreatedTask), ((x)->puxStackBuffer), ((x)->xRegions) )
+#define xTaskCreateRestricted( x, pxCreatedTask ) xTaskGenericCreate( ((x)->pvTaskCode), ((x)->pcName), ((x)->usStackDepth), ((x)->pvParameters), ((x)->uxPriority), (pxCreatedTask), ((x)->puxStackBuffer), ((x)->xRegions), ((x)->xReent) )
 
 /**
  * task. h
@@ -1513,7 +1516,7 @@ void vTaskPriorityDisinherit( TaskHandle_t const pxMutexHolder ) PRIVILEGED_FUNC
  * Generic version of the task creation function which is in turn called by the
  * xTaskCreate() and xTaskCreateRestricted() macros.
  */
-BaseType_t xTaskGenericCreate( TaskFunction_t pxTaskCode, const char * const pcName, const uint16_t usStackDepth, void * const pvParameters, UBaseType_t uxPriority, TaskHandle_t * const pxCreatedTask, StackType_t * const puxStackBuffer, const MemoryRegion_t * const xRegions ) PRIVILEGED_FUNCTION; /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+BaseType_t xTaskGenericCreate( TaskFunction_t pxTaskCode, const char * const pcName, const uint16_t usStackDepth, void * const pvParameters, UBaseType_t uxPriority, TaskHandle_t * const pxCreatedTask, StackType_t * const puxStackBuffer, const MemoryRegion_t * const xRegions, struct _reent *xReent ) PRIVILEGED_FUNCTION; /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
 
 /*
  * Get the uxTCBNumber assigned to the task referenced by the xTask parameter.
@@ -1551,6 +1554,21 @@ void vTaskStepTick( const TickType_t xTicksToJump ) PRIVILEGED_FUNCTION;
  * entered to ensure it is ok to proceed into the sleep mode.
  */
 eSleepModeStatus eTaskConfirmSleepModeStatus( void ) PRIVILEGED_FUNCTION;
+
+uintptr_t ulTaskDebugGetStackedPC( xTaskHandle xTask );
+uintptr_t ulTaskDebugGetStackedLR( xTaskHandle xTask );
+uint32_t ulTaskDebugGetStackedControl( xTaskHandle xTask );
+
+/*
+ * Defines the prototype to which the vTaskListWalk callback must conform.
+ */
+typedef void (*TaskInfoFunction_t)( const xPORT_TASK_INFO * const xTaskInfo, void * xData);
+
+/*
+ * Get info on all tasks. For each task, the pxTaskInfoCode callback will be called with a pointer to
+ * the task info and the provided xData reference pointer.
+ */
+void vTaskListWalk( TaskInfoFunction_t pxTaskInfoCode, void *xData);
 
 #ifdef __cplusplus
 }

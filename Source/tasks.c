@@ -112,6 +112,10 @@ privileged Vs unprivileged linkage and placement. */
 	#define taskYIELD_IF_USING_PREEMPTION() portYIELD_WITHIN_API()
 #endif
 
+#if ( portUSING_MPU_WRAPPERS == 1 )
+	#define portUSING_MPU 1
+#endif
+
 /*
  * Task control block.  A task control block (TCB) is allocated for each task,
  * and stores task state information, including a pointer to the task's context
@@ -121,7 +125,7 @@ typedef struct tskTaskControlBlock
 {
 	volatile StackType_t	*pxTopOfStack;	/*< Points to the location of the last item placed on the tasks stack.  THIS MUST BE THE FIRST MEMBER OF THE TCB STRUCT. */
 
-	#if ( portUSING_MPU_WRAPPERS == 1 )
+	#if ( portUSING_MPU == 1 )
 		xMPU_SETTINGS	xMPUSettings;		/*< The MPU settings are defined as part of the port layer.  THIS MUST BE THE SECOND MEMBER OF THE TCB STRUCT. */
 	#endif
 
@@ -164,8 +168,13 @@ typedef struct tskTaskControlBlock
 		newlib and must provide system-wide implementations of the necessary
 		stubs. Be warned that (at the time of writing) the current newlib design
 		implements a system-wide malloc() that must be provided with locks. */
-		struct 	_reent xNewLib_reent;
+		struct _reent *pxNewLib_reent;
+
+		/* Did the user provide this _reent struct for us or was it created internally? */
+		UBaseType_t uxUserProvidedReent;
 	#endif
+
+	UBaseType_t			uxUserProvidedStack;/*< Did the user provide the memory for the stack or was it malloc'd internally? */
 
 } tskTCB;
 
@@ -184,7 +193,7 @@ typedef tskTCB TCB_t;
 /*lint -e956 A manual analysis and inspection has been used to determine which
 static variables must be declared volatile. */
 
-PRIVILEGED_DATA TCB_t * volatile pxCurrentTCB = NULL;
+__attribute__((section(".kernel_unpriv_ro_bss"))) PRIVILEGED_DATA TCB_t * volatile pxCurrentTCB = NULL;
 
 /* Lists for ready and blocked tasks. --------------------*/
 PRIVILEGED_DATA static List_t pxReadyTasksLists[ configMAX_PRIORITIES ];/*< Prioritised ready tasks. */
@@ -462,7 +471,7 @@ static void prvAddCurrentTaskToDelayedList( const TickType_t xTimeToWake ) PRIVI
  * Allocates memory from the heap for a TCB and associated stack.  Checks the
  * allocation was successful.
  */
-static TCB_t *prvAllocateTCBAndStack( const uint16_t usStackDepth, StackType_t * const puxStackBuffer ) PRIVILEGED_FUNCTION;
+static TCB_t *prvAllocateTCB( const uint16_t usStackDepth, StackType_t * const puxStackBuffer, struct _reent *xReent ) PRIVILEGED_FUNCTION;
 
 /*
  * Fills an TaskStatus_t structure with information on each task that is
@@ -512,7 +521,7 @@ static void prvResetNextTaskUnblockTime( void );
 
 /*-----------------------------------------------------------*/
 
-BaseType_t xTaskGenericCreate( TaskFunction_t pxTaskCode, const char * const pcName, const uint16_t usStackDepth, void * const pvParameters, UBaseType_t uxPriority, TaskHandle_t * const pxCreatedTask, StackType_t * const puxStackBuffer, const MemoryRegion_t * const xRegions ) /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+BaseType_t xTaskGenericCreate( TaskFunction_t pxTaskCode, const char * const pcName, const uint16_t usStackDepth, void * const pvParameters, UBaseType_t uxPriority, TaskHandle_t * const pxCreatedTask, StackType_t * const puxStackBuffer, const MemoryRegion_t * const xRegions, struct _reent *xReent ) /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
 {
 BaseType_t xReturn;
 TCB_t * pxNewTCB;
@@ -522,7 +531,7 @@ TCB_t * pxNewTCB;
 
 	/* Allocate the memory required by the TCB and stack for the new task,
 	checking that the allocation was successful. */
-	pxNewTCB = prvAllocateTCBAndStack( usStackDepth, puxStackBuffer );
+	pxNewTCB = prvAllocateTCB( usStackDepth, puxStackBuffer, xReent );
 
 	if( pxNewTCB != NULL )
 	{
@@ -1284,7 +1293,8 @@ TCB_t * pxNewTCB;
 		/* It does not make sense to check if the calling task is suspended. */
 		configASSERT( xTask );
 
-		/* Is the task being resumed actually in the suspended list? */
+		/* Is the task we are attempting to resume actually in the
+		suspended list? */
 		if( listIS_CONTAINED_WITHIN( &xSuspendedTaskList, &( pxTCB->xGenericListItem ) ) != pdFALSE )
 		{
 			/* Has the task already been resumed from within an ISR? */
@@ -1487,7 +1497,7 @@ BaseType_t xReturn;
 		{
 			/* Switch Newlib's _impure_ptr variable to point to the _reent
 			structure specific to the task that will run first. */
-			_impure_ptr = &( pxCurrentTCB->xNewLib_reent );
+			_impure_ptr = pxCurrentTCB->pxNewLib_reent;
 		}
 		#endif /* configUSE_NEWLIB_REENTRANT */
 
@@ -1830,7 +1840,9 @@ implementations require configUSE_TICKLESS_IDLE to be set to a value other than
 		/* Correct the tick count value after a period during which the tick
 		was suppressed.  Note this does *not* call the tick hook function for
 		each stepped tick. */
+#if !defined(DEBUG_SLEEP) && !defined(DEBUG_STOP)
 		configASSERT( ( xTickCount + xTicksToJump ) <= xNextTaskUnblockTime );
+#endif
 		xTickCount += xTicksToJump;
 		traceINCREASE_TICK_COUNT( xTicksToJump );
 	}
@@ -2153,7 +2165,7 @@ void vTaskSwitchContext( void )
 		{
 			/* Switch Newlib's _impure_ptr variable to point to the _reent
 			structure specific to this task. */
-			_impure_ptr = &( pxCurrentTCB->xNewLib_reent );
+			_impure_ptr = pxCurrentTCB->pxNewLib_reent;
 		}
 		#endif /* configUSE_NEWLIB_REENTRANT */
 	}
@@ -2761,23 +2773,17 @@ UBaseType_t x;
 	}
 	#endif /* configGENERATE_RUN_TIME_STATS */
 
-	#if ( portUSING_MPU_WRAPPERS == 1 )
+	#if ( portUSING_MPU == 1 )
 	{
 		vPortStoreTaskMPUSettings( &( pxTCB->xMPUSettings ), xRegions, pxTCB->pxStack, usStackDepth );
 	}
-	#else /* portUSING_MPU_WRAPPERS */
+	#else
 	{
 		( void ) xRegions;
 		( void ) usStackDepth;
 	}
-	#endif /* portUSING_MPU_WRAPPERS */
+	#endif /* portUSING_MPU */
 
-	#if ( configUSE_NEWLIB_REENTRANT == 1 )
-	{
-		/* Initialise this task's Newlib reent structure. */
-		_REENT_INIT_PTR( ( &( pxTCB->xNewLib_reent ) ) );
-	}
-	#endif /* configUSE_NEWLIB_REENTRANT */
 }
 /*-----------------------------------------------------------*/
 
@@ -2899,7 +2905,7 @@ static void prvAddCurrentTaskToDelayedList( const TickType_t xTimeToWake )
 }
 /*-----------------------------------------------------------*/
 
-static TCB_t *prvAllocateTCBAndStack( const uint16_t usStackDepth, StackType_t * const puxStackBuffer )
+static TCB_t *prvAllocateTCB( const uint16_t usStackDepth, StackType_t * const puxStackBuffer, struct _reent *xReent )
 {
 TCB_t *pxNewTCB;
 
@@ -2929,6 +2935,35 @@ TCB_t *pxNewTCB;
 				( void ) memset( pxNewTCB->pxStack, ( int ) tskSTACK_FILL_BYTE, ( size_t ) usStackDepth * sizeof( StackType_t ) );
 			}
 			#endif /* ( ( configCHECK_FOR_STACK_OVERFLOW > 1 ) || ( ( configUSE_TRACE_FACILITY == 1 ) || ( INCLUDE_uxTaskGetStackHighWaterMark == 1 ) ) ) */
+			pxNewTCB->uxUserProvidedStack = (puxStackBuffer != NULL);
+
+			#if ( configUSE_NEWLIB_REENTRANT == 1 )
+			{
+				pxNewTCB->uxUserProvidedReent = (xReent != NULL);
+				if (xReent)
+				{
+					pxNewTCB->pxNewLib_reent = xReent;
+				}
+				else
+				{
+					pxNewTCB->pxNewLib_reent = pvPortMalloc(sizeof(*pxNewTCB->pxNewLib_reent));
+					if( pxNewTCB->pxNewLib_reent == NULL ) {
+						/* Could not allocate the _reent struct. Free the the rest of the TCB and bail. */
+						if( !pxNewTCB->uxUserProvidedStack )
+						{
+							vPortFree( pxNewTCB->pxStack );
+						}
+						vPortFree( pxNewTCB );
+						pxNewTCB = NULL;
+					}
+					else
+					{
+						/* Initialise this task's Newlib reent structure. */
+						_REENT_INIT_PTR((pxNewTCB->pxNewLib_reent));
+					}
+				}
+			}
+			#endif /* configUSE_NEWLIB_REENTRANT */
 		}
 	}
 
@@ -2960,6 +2995,8 @@ TCB_t *pxNewTCB;
 				pxTaskStatusArray[ uxTask ].xTaskNumber = pxNextTCB->uxTCBNumber;
 				pxTaskStatusArray[ uxTask ].eCurrentState = eState;
 				pxTaskStatusArray[ uxTask ].uxCurrentPriority = pxNextTCB->uxPriority;
+				pxTaskStatusArray[ uxTask ].pxStack = pxNextTCB->pxStack;
+				pxTaskStatusArray[ uxTask ].pxTopOfStack = ( StackType_t * )pxNextTCB->pxTopOfStack;
 
 				#if ( INCLUDE_vTaskSuspend == 1 )
 				{
@@ -3080,7 +3117,17 @@ TCB_t *pxNewTCB;
 
 		/* Free up the memory allocated by the scheduler for the task.  It is up to
 		the task to free any memory allocated at the application level. */
-		vPortFreeAligned( pxTCB->pxStack );
+		if( !pxTCB->uxUserProvidedStack ) {
+			vPortFreeAligned( pxTCB->pxStack );
+		}
+
+		#if ( configUSE_NEWLIB_REENTRANT == 1 )
+			if ( !pxTCB->uxUserProvidedReent ) {
+				vPortFree( pxTCB->pxNewLib_reent );
+			}
+		#endif
+
+
 		vPortFree( pxTCB );
 	}
 
@@ -3543,6 +3590,87 @@ TickType_t uxReturn;
 	return uxReturn;
 }
 /*-----------------------------------------------------------*/
+
+uintptr_t ulTaskDebugGetStackedPC( xTaskHandle xTask ) {
+  return portGET_STACKED_PC( ( StackType_t * ) (( TCB_t * ) xTask)->pxTopOfStack );
+}
+
+uintptr_t ulTaskDebugGetStackedLR( xTaskHandle xTask ) {
+  return portGET_STACKED_LR( ( StackType_t * ) (( TCB_t * ) xTask)->pxTopOfStack );
+}
+/*-----------------------------------------------------------*/
+
+static void prvTaskQueueWalk(xList *pxList, TaskInfoFunction_t pxTaskInfoCode, void *xData) {
+  xPORT_TASK_INFO xTaskInfo;
+  TCB_t *pxNextTCB, *pxFirstTCB;
+
+  // NOTE: listGET_OWNER_OF_NEXT_ENTRY modifies the list structure, so save this value so that
+  //  we can restore it to it's previous state before we exit
+  xListItem *saveHead = pxList->pxIndex;
+
+  listGET_OWNER_OF_NEXT_ENTRY( pxFirstTCB, pxList );
+  do {
+    listGET_OWNER_OF_NEXT_ENTRY( pxNextTCB, pxList );
+
+    // Get the task info for this task and send it to the callback function
+    vPortGetTaskInfo(pxNextTCB, pxNextTCB->pcTaskName, ( StackType_t * ) (pxNextTCB->pxTopOfStack),
+                     &xTaskInfo);
+    (pxTaskInfoCode)(&xTaskInfo, xData);
+
+  } while( pxNextTCB != pxFirstTCB );
+
+  // Leave list in the same state we found it
+  pxList->pxIndex = saveHead;
+}
+/*-----------------------------------------------------------*/
+
+
+void vTaskListWalk( TaskInfoFunction_t pxTaskInfoCode, void *xData) {
+  unsigned portBASE_TYPE uxQueue = configMAX_PRIORITIES;
+
+  do {
+    uxQueue--;
+    if( listLIST_IS_EMPTY( &( pxReadyTasksLists[ uxQueue ] ) ) == pdFALSE )
+    {
+      prvTaskQueueWalk(( xList * ) &( pxReadyTasksLists[ uxQueue ] ), pxTaskInfoCode, xData);
+    }
+  } while( uxQueue > ( unsigned short ) tskIDLE_PRIORITY );
+
+  if ( listLIST_IS_EMPTY( pxDelayedTaskList ) == pdFALSE )
+  {
+    prvTaskQueueWalk(( xList * ) pxDelayedTaskList, pxTaskInfoCode, xData );
+  }
+
+  if( listLIST_IS_EMPTY( pxOverflowDelayedTaskList ) == pdFALSE )
+  {
+    prvTaskQueueWalk( ( xList * ) pxOverflowDelayedTaskList, pxTaskInfoCode, xData );
+  }
+
+#if ( INCLUDE_vTaskDelete == 1 )
+  {
+    if( listLIST_IS_EMPTY( &xTasksWaitingTermination ) == pdFALSE )
+    {
+      prvTaskQueueWalk( ( xList * ) &xTasksWaitingTermination, pxTaskInfoCode, xData );
+    }
+  }
+#endif
+
+#if ( INCLUDE_vTaskSuspend == 1 )
+  {
+    if( listLIST_IS_EMPTY( &xSuspendedTaskList ) == pdFALSE )
+    {
+      prvTaskQueueWalk( ( xList * ) &xSuspendedTaskList, pxTaskInfoCode, xData );
+    }
+  }
+#endif
+
+}
+/*-----------------------------------------------------------*/
+
+
+uint32_t ulTaskDebugGetStackedControl( xTaskHandle xTask ) {
+  return portGET_STACKED_CONTROL( ( StackType_t * ) (( TCB_t * ) xTask)->pxTopOfStack );
+}
 
 #ifdef FREERTOS_MODULE_TEST
 	#include "tasks_test_access_functions.h"

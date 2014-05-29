@@ -196,6 +196,10 @@ include path. */
 	#include "../../Source/portable/GCC/ARM_CM3/portmacro.h"
 #endif
 
+#ifdef GCC_ARM_CM3_PEBBLE
+	#include "../../Source/portable/GCC/ARM_CM3_PEBBLE/portmacro.h"
+#endif
+
 #ifdef IAR_ARM_CM3
 	#include "../../Source/portable/IAR/ARM_CM3/portmacro.h"
 #endif
@@ -392,7 +396,7 @@ void vPortEndScheduler( void ) PRIVILEGED_FUNCTION;
  * Fills the xMPUSettings structure with the memory region information
  * contained in xRegions.
  */
-#if( portUSING_MPU_WRAPPERS == 1 )
+#if( portUSING_MPU == 1 )
 	struct xMEMORY_REGION;
 	void vPortStoreTaskMPUSettings( xMPU_SETTINGS *xMPUSettings, const struct xMEMORY_REGION * const xRegions, StackType_t *pxBottomOfStack, uint16_t usStackDepth ) PRIVILEGED_FUNCTION;
 #endif
